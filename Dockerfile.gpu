@@ -1,0 +1,110 @@
+# Use the official PyTorch image as the base. It comes with a known-good
+# environment, including Python 3.11, CUDA 12.1, and a working torch installation.
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel as base
+
+# Avoid prompts from apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# NOTE(crag): NB_USER ARG for mybinder.org compat:
+# https://mybinder.readthedocs.io/en/latest/tutorials/dockerfile.html
+ARG NB_USER=notebook-user
+ARG NB_UID=1000
+ARG PIP_VERSION=23.2.1
+
+# The pytorch image uses conda. The python executable is in /opt/conda/bin.
+# We set our environment variables to point there directly.
+ENV PYTHON /opt/conda/bin/python
+ENV PIP /opt/conda/bin/python -m pip
+
+# Set up system symlinks to the conda python for compatibility with scripts
+# that might call `python3` or `python`.
+RUN ln -sf /opt/conda/bin/python /usr/bin/python3 && \
+    ln -sf /usr/bin/python3 /usr/bin/python
+
+# System dependencies. The pytorch base image is Ubuntu 22.04, so this is compatible.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    libmagic1 \
+    libreoffice \
+    pandoc \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# The base image runs as root, so we create our user.
+RUN groupadd --gid ${NB_UID} ${NB_USER} && \
+    useradd --uid ${NB_UID} --gid ${NB_UID} -m ${NB_USER}
+ENV HOME /home/${NB_USER}
+WORKDIR ${HOME}
+USER ${NB_USER}
+
+ENV PYTHONPATH="${PYTHONPATH}:${HOME}"
+ENV PATH="/home/${NB_USER}/.local/bin:${PATH}"
+
+
+# Stage 2: Install Python dependencies
+FROM base as python-deps
+ARG NB_USER=notebook-user
+ARG PIP_VERSION=23.2.1
+COPY --chown=${NB_USER}:${NB_USER} requirements/gpu.txt requirements-gpu.txt
+
+# The base image already has torch, torchvision, and torchaudio.
+# We also filter out onnxruntime to avoid memory issues with the resolver,
+# as we will be installing a specific version manually later.
+RUN grep -vE '^torch|^onnxruntime' requirements-gpu.txt > requirements-gpu-filtered.txt
+
+RUN echo "--- Build-Time Diagnostics ---" && \
+    echo "Verifying base image torch installation:" && \
+    ${PYTHON} -c "import torch; print(f'Torch version: {torch.__version__}'); print(f'CUDA available for torch: {torch.cuda.is_available()} (NOTE: False is expected during build)')" && \
+    echo "--------------------------"
+
+RUN ${PIP} install pip==${PIP_VERSION}
+
+# Install our application dependencies.
+RUN ${PIP} install --no-cache-dir -r requirements-gpu-filtered.txt && \
+    # Rip out any CPU-only onnxruntime that might have been installed as a
+    # transitive dependency, and then install the correct GPU version.
+    ${PIP} uninstall -y onnxruntime onnxruntime-gpu && \
+    ${PIP} install --no-cache-dir \
+        gunicorn==22.0.0 \
+        onnxruntime-gpu==1.20.1 \
+        torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 \
+        opencv-python-headless==4.9.0.80 \
+        --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+
+
+# Stage 3: Download model weights
+FROM python-deps as model-deps
+ARG NB_USER=notebook-user
+ARG PIP_VERSION=23.2.1
+
+# Final check of the fully-installed environment
+RUN python3 -c "import onnxruntime; assert 'CUDAExecutionProvider' in onnxruntime.get_available_providers(), f'CUDA provider not found in {onnxruntime.get_available_providers()}'"
+
+ENV UNSTRUCTURED_HI_RES_MODEL_NAME=yolox
+RUN ${PYTHON} -c "from unstructured.nlp.tokenize import download_nltk_packages; download_nltk_packages()" && \
+    ${PYTHON} -c "from unstructured.partition.model_init import initialize; initialize()"
+
+# Stage 4: Final application stage
+FROM model-deps as final
+ARG NB_USER=notebook-user
+USER ${NB_USER}
+WORKDIR ${HOME}
+
+# Ensure the container requests GPU access at runtime.
+ENV NVIDIA_VISIBLE_DEVICES all
+ENV NVIDIA_DRIVER_CAPABILITIES compute,utility
+
+COPY --chown=${NB_USER}:${NB_USER} sample-docs/ ./sample-docs/
+COPY --chown=${NB_USER}:${NB_USER} gpu_orchestrator/ ./gpu_orchestrator/
+COPY --chown=${NB_USER}:${NB_USER} scripts/ ./scripts/
+COPY --chown=${NB_USER}:${NB_USER} prepline_general/ ./prepline_general/
+COPY --chown=${NB_USER}:${NB_USER} logger_config.yaml .
+
+RUN chmod +x scripts/*.sh
+
+EXPOSE 8000
+ENTRYPOINT ["scripts/manager-start.sh"]

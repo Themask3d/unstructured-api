@@ -417,3 +417,6 @@ xlrd==2.0.1
     # via unstructured
 xlsxwriter==3.2.0
     # via python-pptx
+
+# For orchestrator
+httpx

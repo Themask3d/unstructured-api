@@ -130,3 +130,13 @@ def healthcheck(request: Request):
 
 
 logger.info("Started Unstructured API")
+
+try:
+    import os
+    logger.info(f"LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH')}")
+    from onnxruntime.capi import _pybind_state as C
+    logger.info(f"Available ONNXRT providers: {C.get_available_providers()}")
+except ImportError:
+    logger.warning("onnxruntime not found. GPU providers will not be available.")
+except Exception as e:
+    logger.error(f"Failed to check ONNXRT providers: {e}")
