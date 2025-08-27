@@ -145,7 +145,7 @@ if __name__ == "__main__":
         type=str,
         nargs="?",
         default="pdf_for_testing",
-        help="The directory containing files to submit (defaults to 'pdf_for_testing').",
+        help="The directory containing files to submit (defaults to 'pdf for testing').",
     )
     args = parser.parse_args()
 

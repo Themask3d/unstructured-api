@@ -161,8 +161,8 @@ class WorkerManager:
 
         await self.stop_worker(pid)
         new_worker = await self.start_worker(port)
-        # Start the warm-up for the new worker
-        asyncio.create_task(self.warm_up_worker(new_worker))
+        # We now await the warm-up to ensure restarts are sequential and blocking.
+        await self.warm_up_worker(new_worker)
 
 
     async def warm_up_worker(self, worker: Worker):
@@ -341,37 +341,73 @@ async def page_processor(request: Request):
     that have parallel mode enabled. It acts as a stateless, streaming proxy,
     dispatching these page-level jobs to any available worker.
     """
+    # We must parse the form to inspect the filename for the job_id.
+    # This is a trade-off: it uses more memory in the orchestrator than a pure
+    # stream, but it's necessary for the cancellation logic.
+    form_data = await request.form()
+    
+    fwd_files = []
+    fwd_data = {}
+    job_id = None
+
+    for key, value in form_data.multi_items():
+        # We check the type name as a robust way to identify file uploads,
+        # as `isinstance` can sometimes fail in complex dependency environments.
+        if type(value).__name__ == 'UploadFile':
+            upload_file = value # It's an UploadFile object
+            if upload_file.filename and "job_id_" in upload_file.filename:
+                try:
+                    # Extract job_id from filename like "job_id_xyz__original.pdf"
+                    job_id = upload_file.filename.split("__")[0].replace("job_id_", "")
+                except (IndexError, TypeError):
+                    pass # Couldn't parse, proceed without job_id
+            
+            file_content = await upload_file.read()
+            fwd_files.append((key, (upload_file.filename, file_content, upload_file.content_type)))
+        else:
+            # It's a regular form field
+            fwd_data[key] = value
+
+    # --- Cancellation Check ---
+    if job_id and job_id in job_store and job_store[job_id]["status"] == "failed":
+        print(f"Rejecting page processing for failed job {job_id}")
+        return Response(status_code=409, content="Parent job failed or cancelled")
+    # ---
+
     worker = await worker_manager.find_available_worker()
     worker.in_flight_requests += 1
 
     try:
-        # The destination URL for the worker that will process the page
         url = httpx.URL(f"{worker.url}/general/v0/general")
+        client = httpx.AsyncClient(timeout=300.0)
         
-        # We act as a streaming proxy. We stream the incoming request body
-        # to the downstream worker. This is more robust than parsing/rebuilding the form.
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            fwd_request = client.build_request(
-                method=request.method,
-                url=url,
-                headers=request.headers.items(),
-                content=request.stream(),
-            )
-            response = await client.send(fwd_request, stream=True)
+        # Forward the parsed and buffered request.
+        # We must build the request and then use `send` to enable streaming.
+        fwd_request = client.build_request("POST", url, data=fwd_data, files=fwd_files)
+        response = await client.send(fwd_request, stream=True)
 
-            # Stream the response from the processing worker back to the calling worker
-            return StreamingResponse(
-                content=response.aiter_bytes(),
-                status_code=response.status_code,
-                headers=response.headers,
-            )
+        async def response_generator(response: httpx.Response):
+            try:
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+            finally:
+                await response.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            content=response_generator(response),
+            status_code=response.status_code,
+            headers=response.headers,
+        )
 
     except Exception as e:
-        # Log the error and return a 500
         print(f"Error in page_processor forwarding to worker {worker.port}: {e}")
+        if 'client' in locals() and not client.is_closed:
+            await client.aclose()
+        if 'response' in locals():
+            await response.aclose()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # A page counts as a "document" for the purposes of worker refresh logic
         worker.processed_docs += 1
         worker.in_flight_requests -= 1
 
@@ -394,14 +430,18 @@ async def process_jobs():
             for filename, content in job_details["files"].items():
                 content_type = job_details["content_types"].get(filename)
                 
-                # Sanitize the filename to avoid issues with special characters or length
-                _, extension = os.path.splitext(filename)
-                safe_filename = f"{uuid.uuid4()}{extension}"
+                # Prepend the job_id to the filename to ensure we can track it
+                # through the parallel processing pipeline.
+                safe_filename = f"job_id_{job_id}__{filename}"
 
                 forward_files.append(("files", (safe_filename, content, content_type)))
             
             # Prepare data payload
             data_payload = json.loads(job_details["parameters"])
+
+            # We inject the job_id so that the unstructured library, if it supports it,
+            # can pass it back to the page_processor for cancellation checks.
+            data_payload["job_id"] = job_id
 
             # --- Enforce GPU strategy ---
             data_payload["strategy"] = "hi_res"

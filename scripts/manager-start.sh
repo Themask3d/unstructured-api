@@ -7,7 +7,7 @@ export PORT=${PORT:-8000}
 # The manager application must run as a single process to manage the worker pool
 # and job queue state correctly. The number of unstructured workers is determined
 # dynamically inside the Python application.
-uvicorn gpu_orchestrator.main:app \
+exec uvicorn gpu_orchestrator.main:app \
     --host 0.0.0.0 \
     --port "$PORT" \
     --log-config logger_config.yaml \
