@@ -49,12 +49,16 @@ ENV PATH="/home/${NB_USER}/.local/bin:${PATH}"
 FROM base as python-deps
 ARG NB_USER=notebook-user
 ARG PIP_VERSION=23.2.1
-COPY --chown=${NB_USER}:${NB_USER} requirements/gpu.txt requirements-gpu.txt
+COPY --chown=${NB_USER}:${NB_USER} unstructured-api/requirements/gpu.txt requirements-gpu.txt
+
+# Copy the local unstructured repositories
+COPY --chown=${NB_USER}:${NB_USER} unstructured-inference/ ./unstructured-inference/
+COPY --chown=${NB_USER}:${NB_USER} unstructured/ ./unstructured/
 
 # The base image already has torch, torchvision, and torchaudio.
 # We also filter out onnxruntime to avoid memory issues with the resolver,
 # as we will be installing a specific version manually later.
-RUN grep -vE '^torch|^onnxruntime' requirements-gpu.txt > requirements-gpu-filtered.txt
+RUN grep -vE '^torch|^onnxruntime|^unstructured' requirements-gpu.txt > requirements-gpu-filtered.txt
 
 RUN echo "--- Build-Time Diagnostics ---" && \
     echo "Verifying base image torch installation:" && \
@@ -64,7 +68,9 @@ RUN echo "--- Build-Time Diagnostics ---" && \
 RUN ${PIP} install pip==${PIP_VERSION}
 
 # Install our application dependencies.
-RUN ${PIP} install --no-cache-dir -r requirements-gpu-filtered.txt && \
+RUN ${PIP} install --no-cache-dir -e ./unstructured-inference/ && \
+    ${PIP} install --no-cache-dir -e './unstructured[all-docs]' && \
+    ${PIP} install --no-cache-dir -r requirements-gpu-filtered.txt && \
     # Rip out any CPU-only onnxruntime that might have been installed as a
     # transitive dependency, and then install the correct GPU version.
     ${PIP} uninstall -y onnxruntime onnxruntime-gpu && \
@@ -73,6 +79,7 @@ RUN ${PIP} install --no-cache-dir -r requirements-gpu-filtered.txt && \
         onnxruntime-gpu==1.20.1 \
         torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 \
         opencv-python-headless==4.9.0.80 \
+        python-doctr \
         --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 
 
@@ -83,6 +90,12 @@ ARG PIP_VERSION=23.2.1
 
 # Final check of the fully-installed environment
 RUN python3 -c "import onnxruntime; assert 'CUDAExecutionProvider' in onnxruntime.get_available_providers(), f'CUDA provider not found in {onnxruntime.get_available_providers()}'"
+
+# Download the NLTK packages
+# NOTE(crag): we need punkt_tab and averaged_perceptron_tagger_eng for `unstructured`
+# See: https://github.com/Unstructured-IO/unstructured/issues/3617
+ENV NLTK_DATA=${HOME}/nltk_data
+RUN ${PYTHON} -m nltk.downloader -d ${NLTK_DATA} punkt_tab averaged_perceptron_tagger_eng
 
 ENV UNSTRUCTURED_HI_RES_MODEL_NAME=yolox
 RUN ${PYTHON} -c "from unstructured.nlp.tokenize import download_nltk_packages; download_nltk_packages()" && \
@@ -98,11 +111,13 @@ WORKDIR ${HOME}
 ENV NVIDIA_VISIBLE_DEVICES all
 ENV NVIDIA_DRIVER_CAPABILITIES compute,utility
 
-COPY --chown=${NB_USER}:${NB_USER} sample-docs/ ./sample-docs/
-COPY --chown=${NB_USER}:${NB_USER} gpu_orchestrator/ ./gpu_orchestrator/
-COPY --chown=${NB_USER}:${NB_USER} scripts/ ./scripts/
-COPY --chown=${NB_USER}:${NB_USER} prepline_general/ ./prepline_general/
-COPY --chown=${NB_USER}:${NB_USER} logger_config.yaml .
+ENV OCR_AGENT=unstructured.partition.utils.ocr_models.doctr_ocr.OCRAgentDocTR
+
+COPY --chown=${NB_USER}:${NB_USER} unstructured-api/sample-docs/ ./sample-docs/
+COPY --chown=${NB_USER}:${NB_USER} unstructured-api/gpu_orchestrator/ ./gpu_orchestrator/
+COPY --chown=${NB_USER}:${NB_USER} unstructured-api/scripts/ ./scripts/
+COPY --chown=${NB_USER}:${NB_USER} unstructured-api/prepline_general/ ./prepline_general/
+COPY --chown=${NB_USER}:${NB_USER} unstructured-api/logger_config.yaml .
 
 RUN chmod +x scripts/*.sh
 

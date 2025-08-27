@@ -2,10 +2,13 @@ import os
 import requests
 import time
 import argparse
+import json
 from typing import List, Dict, Any
 
 API_URL = "http://localhost:8000/v0/partition"
 STATUS_URL = "http://localhost:8000/v0/status"
+RESULTS_DIR = "load_test_results"
+
 
 def submit_file(file_path: str) -> str | None:
     """Submits a single file and returns the job_id."""
@@ -22,6 +25,7 @@ def submit_file(file_path: str) -> str | None:
         print(f"Error submitting {file_path}: {e}")
         return None
 
+
 def get_page_count_from_result(result: List[Dict[str, Any]]) -> int:
     """Extracts the highest page number from a partitioning result."""
     if not result or not isinstance(result, list):
@@ -34,11 +38,14 @@ def get_page_count_from_result(result: List[Dict[str, Any]]) -> int:
             max_page = page_number
     return max_page
 
+
 def run_performance_test(files_to_submit: List[str]):
     """Submits all files, waits for completion, and prints a performance report."""
     if not files_to_submit:
         print("No files to submit for the test.")
         return
+
+    os.makedirs(RESULTS_DIR, exist_ok=True)
 
     print(f"Starting performance test with {len(files_to_submit)} documents...")
 
@@ -69,7 +76,24 @@ def run_performance_test(files_to_submit: List[str]):
                 if status in ["succeeded", "failed"]:
                     job_info = jobs[job_id]
                     duration = time.time() - job_info["start_time"]
-                    
+
+                    # Extract and concatenate all text fields to create a FULL_TEXT entry
+                    full_text = ""
+                    if status == "succeeded" and "result" in status_data and isinstance(
+                        status_data["result"], list
+                    ):
+                        text_parts = [
+                            element.get("text", "") for element in status_data["result"]
+                        ]
+                        full_text = "\n".join(filter(None, text_parts))
+                    status_data["FULL_TEXT"] = full_text
+
+                    # Save the JSON response to a file
+                    base_filename = os.path.splitext(job_info["filename"])[0]
+                    output_path = os.path.join(RESULTS_DIR, f"{base_filename}.json")
+                    with open(output_path, "w") as f:
+                        json.dump(status_data, f, indent=4)
+
                     page_count = 0
                     if status == "succeeded":
                         page_count = get_page_count_from_result(status_data.get("result", []))
@@ -81,7 +105,10 @@ def run_performance_test(files_to_submit: List[str]):
                         "status": status,
                     })
                     pending_jobs.remove(job_id)
-                    print(f"  - Job {job_id} ({job_info['filename']}) finished with status: {status}")
+                    print(
+                        f"  - Job {job_id} ({job_info['filename']}) finished with status: {status}. "
+                        f"Result saved to {output_path}"
+                    )
 
             except requests.exceptions.RequestException as e:
                 print(f"Error checking status for {job_id}: {e}")
