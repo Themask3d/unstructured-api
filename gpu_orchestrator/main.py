@@ -48,8 +48,8 @@ def calculate_num_workers():
         print(f"Warning: Could not determine GPU memory via script. Falling back to default. Error: {e}")
 
     if available_gb_ram > 0:
-        # Formula: AVAILABLE_GB_RAM_ON_SERVER / 5
-        num_workers = math.floor(available_gb_ram / 5)
+        # Formula: (AVAILABLE_GB_RAM_ON_SERVER / 2) - 1
+        num_workers = math.floor(available_gb_ram / 2) - 1
         print(f"Detected {available_gb_ram} GB of GPU memory.")
         # Ensure at least 1 worker if there's any GPU memory
         return max(1, num_workers)

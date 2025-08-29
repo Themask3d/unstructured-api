@@ -7,7 +7,8 @@ from typing import List, Dict, Any
 
 API_URL = "http://localhost:8000/v0/partition"
 STATUS_URL = "http://localhost:8000/v0/status"
-RESULTS_DIR = "load_test_results"
+# NOTE(crag): The default is now set via the argparser
+# RESULTS_DIR = "load_test_results"
 
 
 def submit_file(file_path: str) -> str | None:
@@ -39,13 +40,13 @@ def get_page_count_from_result(result: List[Dict[str, Any]]) -> int:
     return max_page
 
 
-def run_performance_test(files_to_submit: List[str]):
+def run_performance_test(files_to_submit: List[str], results_dir: str):
     """Submits all files, waits for completion, and prints a performance report."""
     if not files_to_submit:
         print("No files to submit for the test.")
         return
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(results_dir, exist_ok=True)
 
     print(f"Starting performance test with {len(files_to_submit)} documents...")
 
@@ -75,7 +76,8 @@ def run_performance_test(files_to_submit: List[str]):
 
                 if status in ["succeeded", "failed"]:
                     job_info = jobs[job_id]
-                    duration = time.time() - job_info["start_time"]
+                    end_time = time.time()
+                    duration = end_time - job_info["start_time"]
 
                     # Extract and concatenate all text fields to create a FULL_TEXT entry
                     full_text = ""
@@ -88,16 +90,25 @@ def run_performance_test(files_to_submit: List[str]):
                         full_text = "\n".join(filter(None, text_parts))
                     status_data["FULL_TEXT"] = full_text
 
-                    # Save the JSON response to a file
-                    base_filename = os.path.splitext(job_info["filename"])[0]
-                    output_path = os.path.join(RESULTS_DIR, f"{base_filename}.json")
-                    with open(output_path, "w") as f:
-                        json.dump(status_data, f, indent=4)
-
                     page_count = 0
                     if status == "succeeded":
                         page_count = get_page_count_from_result(status_data.get("result", []))
-                    
+
+                    # Augment the status data with performance and job info
+                    status_data["job_info"] = {"filename": job_info["filename"]}
+                    status_data["performance"] = {
+                        "start_time": job_info["start_time"],
+                        "end_time": end_time,
+                        "duration": duration,
+                        "pages": page_count,
+                    }
+
+                    # Save the augmented JSON response to a file
+                    base_filename = os.path.splitext(job_info["filename"])[0]
+                    output_path = os.path.join(results_dir, f"{base_filename}.json")
+                    with open(output_path, "w") as f:
+                        json.dump(status_data, f, indent=4)
+
                     results.append({
                         "filename": job_info["filename"],
                         "duration": duration,
@@ -171,8 +182,14 @@ if __name__ == "__main__":
         "directory",
         type=str,
         nargs="?",
-        default="pdf_for_testing",
-        help="The directory containing files to submit (defaults to 'pdf for testing').",
+        default="pdf for testing",
+        help="The directory containing files to submit (defaults to 'sample-docs').",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default="load_test_results",
+        help="The directory where result JSON files will be saved.",
     )
     args = parser.parse_args()
 
@@ -188,4 +205,4 @@ if __name__ == "__main__":
         if os.path.isfile(full_path):
             files_to_submit.append(full_path)
 
-    run_performance_test(files_to_submit)
+    run_performance_test(files_to_submit, args.results_dir)
